@@ -26,13 +26,13 @@ def _m_literal(value, kind: str) -> str:
     escaped = str(value).replace('"', '""')
     return f'"{escaped}"'
 
-def _m_row(row: dict) -> str:
-    values = ", ".join(_m_literal(row[c], column_kind(c)) for c in STABLE_COLUMNS)
+def _m_row(row: dict, columns: list) -> str:
+    values = ", ".join(_m_literal(row[c], column_kind(c)) for c in columns)
     return "{" + values + "}"
 
-def _source_table_m(rows: list) -> str:
-    headers = ", ".join(f'"{c}"' for c in STABLE_COLUMNS)
-    row_lines = ",\n        ".join(_m_row(r) for r in rows)
+def _source_table_m(rows: list, columns: list) -> str:
+    headers = ", ".join(f'"{c}"' for c in columns)
+    row_lines = ",\n        ".join(_m_row(r, columns) for r in rows)
     return (
         "#table(\n"
         f"        {{{headers}}},\n"
@@ -116,7 +116,11 @@ _RELATIVE_STEP_EXPRESSIONS = {
     ),
 }
 
-def emit_powerquery(rows: list, fiscal_start_month: int = 4) -> str:
+def emit_powerquery(rows: list, fiscal_start_month: int = 4, columns: list = None) -> str:
+    """`columns` defaults to STABLE_COLUMNS (NZ) for backward compatibility;
+    AU/Combined callers pass their own dataset's actual columns.
+    """
+    cols = columns if columns is not None else STABLE_COLUMNS
     fsm = fiscal_start_month
     bindings = [
         "Today = DateTime.Date(DateTime.LocalNow())",
@@ -131,7 +135,7 @@ def emit_powerquery(rows: list, fiscal_start_month: int = 4) -> str:
         # April fiscal start -- wrap in the positive-modulo idiom (I2).
         "TodayFiscalMonth = Number.Mod(Number.Mod(Date.Month(Today) - FiscalStartMonth, 12) + 12, 12) + 1",
         "TodayFiscalQuarter = Number.IntegerDivide(TodayFiscalMonth - 1, 3) + 1",
-        f"Source = {_source_table_m(rows)}",
+        f"Source = {_source_table_m(rows, cols)}",
     ]
 
     prev = "Source"

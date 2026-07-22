@@ -18,32 +18,37 @@ compiling against a different warehouse.
 import csv
 import io
 
-from .holidays_nz import NZ_SUBDIVISIONS
+from .countries import get_country
+from .columns import seed_columns as seed_columns_for
 from .sql_common import relative_select_sql
 
 DBT_UTILS_VERSION_PIN = ">=1.1.0, <2.0.0"  # pin for dbt_utils.date_spine
 
-SEED_COLUMNS = (
-    ["Date", "IsHoliday", "HolidayName", "IsObserved"]
-    + [f"IsHoliday_{code}" for code in NZ_SUBDIVISIONS]
-)
+# Backward-compat constant: the NZ-shaped seed column list (spec §7
+# regression guard -- same content/order as the pre-refactor hardcoded
+# list). AU callers should pass columns=seed_columns_for(["AU"]) instead.
+SEED_COLUMNS = seed_columns_for(["NZ"])
 
-def build_dbt_seed_csv(rows: list) -> str:
-    """CSV for seeds/nz_date_dimension_holidays.csv — the holiday/Matariki/
-    provincial-anniversary lookup the dbt model left-joins against its
-    date_spine-generated calendar. Deliberately excludes calendar/fiscal
-    columns (Year, FiscalYear, ...): the model derives those itself from
-    the spine date, so they're not duplicated into the seed.
+def build_dbt_seed_csv(rows: list, columns: list = None) -> str:
+    """CSV for seeds/<country>_date_dimension_holidays.csv — the holiday/
+    Matariki/regional-anniversary lookup the dbt model left-joins against
+    its date_spine-generated calendar. Deliberately excludes calendar/
+    fiscal columns (Year, FiscalYear, ...): the model derives those itself
+    from the spine date, so they're not duplicated into the seed.
+
+    `columns` defaults to SEED_COLUMNS (NZ) for backward compatibility;
+    AU callers pass seed_columns_for(["AU"]) (see columns.py).
     """
+    cols = columns if columns is not None else SEED_COLUMNS
     # csv.writer (not a bare ",".join) so any future comma/quote/newline in
     # a seed value (e.g. a HolidayName) is properly quoted rather than
     # silently corrupting column alignment (M1).
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(SEED_COLUMNS)
+    writer.writerow(cols)
     for row in rows:
         values = []
-        for col in SEED_COLUMNS:
+        for col in cols:
             v = row[col]
             if v is None:
                 values.append("")
@@ -56,9 +61,9 @@ def build_dbt_seed_csv(rows: list) -> str:
         writer.writerow(values)
     return buf.getvalue()
 
-def write_dbt_seed(rows: list, path: str) -> None:
+def write_dbt_seed(rows: list, path: str, columns: list = None) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        f.write(build_dbt_seed_csv(rows))
+        f.write(build_dbt_seed_csv(rows, columns=columns))
 
 # ---------------------------------------------------------------------------
 # Model SQL. Hand-written Snowflake-flavoured date functions
@@ -83,9 +88,34 @@ def _case_map(expr: str, names: list, start_index: int = 1) -> str:
     return f"CASE {expr}\n        {whens}\n    END"
 
 def build_dbt_model_sql(start_year: int = 2015, end_year: int = 2050,
-                         fiscal_start_month: int = 4,
-                         holiday_seed_ref: str = "nz_date_dimension_holidays") -> str:
-    fsm = fiscal_start_month
+                         fiscal_start_month: int = None,
+                         holiday_seed_ref: str = None,
+                         country: str = "NZ") -> str:
+    """Country-parameterised dbt model (spec §7). `fiscal_start_month`
+    defaults to the country's own config (NZ=4, AU=7) when not given
+    explicitly; `holiday_seed_ref` defaults to `<country>_date_dimension_
+    holidays` (matching write_dbt_seed's default path naming).
+
+    Combined ("ANZ") mode is deliberately NOT supported here: this model's
+    fiscal-year CTEs apply a single fiscal_start_month to the whole spine,
+    but Combined rows need a PER-ROW country-dependent fiscal year (NZ
+    Apr-start vs AU Jul-start) -- not expressible in this hand-authored
+    single-model SQL without a much larger rewrite. Raises clearly rather
+    than silently emitting a wrong model; use --country nz or --country au.
+    """
+    if country.upper() == "COMBINED":
+        raise NotImplementedError(
+            "dbt model/seed emission does not support --country combined: "
+            "this model applies one fiscal_start_month to the whole date "
+            "spine, but Combined rows need a per-row country-dependent "
+            "fiscal year (NZ Apr-start vs AU Jul-start). Generate the NZ "
+            "and AU dbt models separately instead."
+        )
+    cfg = get_country(country)
+    fsm = fiscal_start_month if fiscal_start_month is not None else cfg.fiscal_start_month
+    if holiday_seed_ref is None:
+        holiday_seed_ref = f"{cfg.output_stem.replace('-', '_')}_holidays"
+    subdivisions = cfg.subdivisions
     start_date_lit = f"cast('{start_year}-01-01' as date)"
     end_date_lit = f"cast('{end_year}-12-31' as date)"
     # One day PAST the intended end_date, used only as date_spine()'s own
@@ -159,7 +189,7 @@ def build_dbt_model_sql(start_year: int = 2015, end_year: int = 2050,
 
     regional_cols = ",\n        ".join(
         f'coalesce(holidays."IsHoliday_{code}", false) as "IsHoliday_{code}"'
-        for code in NZ_SUBDIVISIONS
+        for code in subdivisions
     )
     with_holidays = f"""holidays as (
     select * from {{{{ ref('{holiday_seed_ref}') }}}}
@@ -179,13 +209,16 @@ def build_dbt_model_sql(start_year: int = 2015, end_year: int = 2050,
 
     relative_fragment = relative_select_sql("with_holidays", "snowflake", fsm)
 
-    header = f'''-- models/nz_date_dimension.sql
+    model_stem = cfg.output_stem.replace("-", "_")
+
+    header = f'''-- models/{model_stem}.sql
 --
--- NZ date dimension -- dbt model (Plan B, spec section 8). Calendar spine
--- generated via dbt_utils.date_spine; holiday/Matariki/provincial-
--- anniversary logic is looked up from the nz_date_dimension_holidays seed
--- rather than recomputed here -- Python already did that thinking (spec
--- section 8's "materialisation, not computation" principle).
+-- {cfg.name} date dimension -- dbt model (Plan B, spec section 8; country-
+-- parameterised per spec section 7). Calendar spine generated via
+-- dbt_utils.date_spine; holiday/regional-anniversary logic is looked up
+-- from the {holiday_seed_ref} seed rather than recomputed here -- Python
+-- already did that thinking (spec section 8's "materialisation, not
+-- computation" principle).
 --
 -- Pin dbt_utils in packages.yml:
 --   packages:

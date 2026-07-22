@@ -2,6 +2,7 @@ import re
 from nz_date_dimension.build import build_dataset, STABLE_COLUMNS
 from nz_date_dimension.relative import RELATIVE_COLUMNS
 from nz_date_dimension.emit_powerquery import emit_powerquery
+from nz_date_dimension.columns import stable_columns
 
 def test_emit_powerquery_has_let_in_and_source_table():
     rows = build_dataset(2025, 2025)  # 365 rows
@@ -54,3 +55,17 @@ def test_today_fiscal_month_uses_positive_modulo_guard():
     # name) so it doesn't false-match the nested Number.Mod(...) + 12 inside
     # the corrected positive-modulo expression above.
     assert "TodayFiscalMonth = Number.Mod(Date.Month(Today) - FiscalStartMonth, 12) + 1" not in m
+
+def test_emit_powerquery_au_uses_au_columns_not_nz():
+    rows = build_dataset(2025, 2025, country="AU")
+    au_cols = stable_columns(["AU"])
+    m = emit_powerquery(rows, fiscal_start_month=7, columns=au_cols)
+    assert '"IsHoliday_WA"' in m
+    assert '"IsHoliday_AUK"' not in m
+
+def test_emit_powerquery_combined_includes_country_and_prefixed_flags():
+    rows = build_dataset(2025, 2025, country="combined")
+    combined_cols = stable_columns(["NZ", "AU"])
+    m = emit_powerquery(rows, columns=combined_cols)
+    assert '"Country"' in m
+    assert '"IsHoliday_NZ_AUK"' in m and '"IsHoliday_AU_WA"' in m

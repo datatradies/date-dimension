@@ -1,9 +1,11 @@
 import csv
 import io
 import re
+import pytest
 from nz_date_dimension.build import build_dataset, STABLE_COLUMNS
 from nz_date_dimension.relative import RELATIVE_COLUMNS
-from nz_date_dimension.holidays_nz import NZ_SUBDIVISIONS
+from nz_date_dimension.countries import NZ_SUBDIVISIONS, AU_SUBDIVISIONS
+from nz_date_dimension.columns import seed_columns
 from nz_date_dimension.emit_dbt import build_dbt_model_sql, build_dbt_seed_csv, SEED_COLUMNS
 
 def test_seed_csv_has_holiday_and_regional_columns_only():
@@ -114,3 +116,46 @@ def test_seed_csv_escapes_values_containing_commas():
     reader = list(csv.DictReader(io.StringIO(csv_text)))
     assert reader[0]["HolidayName"] == "Foo, Bar Day"
     assert set(reader[0].keys()) == set(SEED_COLUMNS)
+
+# --- AU (spec §7: emitters must derive columns from the country config) ---
+
+def test_au_seed_csv_uses_au_state_flags_not_nz():
+    rows = build_dataset(2025, 2025, country="AU")
+    au_seed_cols = seed_columns(["AU"])
+    csv_text = build_dbt_seed_csv(rows, columns=au_seed_cols)
+    reader = list(csv.DictReader(io.StringIO(csv_text)))
+    assert len(reader) == 365
+    assert reader[0].keys() == set(au_seed_cols)
+    for code in AU_SUBDIVISIONS:
+        assert f"IsHoliday_{code}" in au_seed_cols
+    for code in NZ_SUBDIVISIONS:
+        if code not in AU_SUBDIVISIONS:  # "TAS" is a valid code in both (AU's Tasmania)
+            assert f"IsHoliday_{code}" not in au_seed_cols
+
+def test_au_dbt_model_uses_au_fiscal_start_month_by_default():
+    sql = build_dbt_model_sql(start_year=2025, end_year=2026, country="AU")
+    # fiscal_start_month should default to AU's 7, not NZ's 4, without the
+    # caller having to pass it explicitly (spec §7 resolution).
+    assert 'when "Month" >= 7' in sql
+
+def test_au_dbt_model_uses_au_state_flags_and_seed_ref():
+    sql = build_dbt_model_sql(country="AU")
+    for code in AU_SUBDIVISIONS:
+        assert f'"IsHoliday_{code}"' in sql
+    for code in NZ_SUBDIVISIONS:
+        if code not in AU_SUBDIVISIONS:  # TAS is a valid code in both
+            assert f'"IsHoliday_{code}"' not in sql
+    assert "ref('au_date_dimension_holidays')" in sql
+
+def test_dbt_model_default_country_is_still_nz():
+    sql = build_dbt_model_sql()
+    assert "ref('nz_date_dimension_holidays')" in sql
+    assert 'when "Month" >= 4' in sql
+
+def test_dbt_model_combined_is_explicitly_unsupported():
+    # Per-row country-dependent fiscal year isn't expressible in this
+    # hand-authored single-model SQL -- Combined dbt emission is out of
+    # scope for this refactor; must fail loudly and clearly, not silently
+    # produce wrong SQL.
+    with pytest.raises((NotImplementedError, ValueError), match="(?i)combined"):
+        build_dbt_model_sql(country="combined")

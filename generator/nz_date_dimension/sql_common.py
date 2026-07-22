@@ -9,8 +9,8 @@ stay live on refresh (spec §7, §4.5).
 emit_tsql.py / emit_snowflake.py / emit_databricks.py are the public
 entry points; this module only holds logic genuinely shared across all
 three dialects (column typing, literal formatting, view SQL shape),
-matching the existing repo pattern of regional.py importing shared
-constants from holidays_nz.py.
+matching the existing repo pattern of regional.py deriving its calendars
+from a country config (countries.py).
 """
 from .build import STABLE_COLUMNS
 
@@ -20,7 +20,7 @@ _DATE_COLUMNS = {
 }
 _STRING_COLUMNS = {
     "QuarterName", "MonthName", "MonthShort", "DayName", "DayShort",
-    "FiscalYearLabel", "HolidayName",
+    "FiscalYearLabel", "HolidayName", "Country",
 }
 _BOOL_COLUMNS_EXACT = {"IsWeekend", "IsWeekday", "IsHoliday", "IsObserved", "IsBusinessDay"}
 
@@ -113,34 +113,48 @@ def sql_literal(value, kind: str, dialect: str) -> str:
     escaped = str(value).replace("'", "''")
     return f"'{escaped}'"
 
-def create_table_sql(table_name: str, dialect: str) -> str:
+def create_table_sql(table_name: str, dialect: str, columns: list = None,
+                      primary_key: list = None) -> str:
+    """`columns` defaults to STABLE_COLUMNS (NZ) for backward compatibility;
+    AU/Combined callers pass their own dataset's actual columns (spec §7:
+    "the refactor must derive columns dynamically", not hardcode NZ's).
+
+    `primary_key` defaults to `["Date"]` (every single-country table);
+    Combined mode passes `["Date", "Country"]` -- a composite key, since
+    `Date` alone isn't unique once NZ and AU rows share the table.
+    """
+    cols = columns if columns is not None else STABLE_COLUMNS
+    pk_cols = primary_key if primary_key is not None else ["Date"]
     cfg = DIALECTS[dialect]
     q = cfg["quote"]
     col_defs = []
-    for col in STABLE_COLUMNS:
+    for col in cols:
         sql_type = cfg["types"][column_kind(col)]
         nullability = "NULL" if col == "HolidayName" else "NOT NULL"
         col_defs.append(f"    {q(col)} {sql_type} {nullability}")
+    pk_col_list = ", ".join(q(c) for c in pk_cols)
     if dialect == "databricks":
         # PRIMARY KEY is a hard syntax error on Databricks outside Unity
         # Catalog (and merely informational/unenforced even inside it) --
         # document the natural key as a comment instead of a real
         # constraint so the script runs on any Databricks target (M3).
-        note = f"-- Primary key: {q('Date')} (informational only -- requires Unity Catalog)\n"
+        note = f"-- Primary key: {pk_col_list} (informational only -- requires Unity Catalog)\n"
         return note + f"CREATE TABLE {q(table_name)} (\n" + ",\n".join(col_defs) + "\n);"
     # T-SQL/Snowflake PRIMARY KEY constraints are fully supported.
-    col_defs.append(f"    CONSTRAINT PK_{table_name} PRIMARY KEY ({q('Date')})")
+    col_defs.append(f"    CONSTRAINT PK_{table_name} PRIMARY KEY ({pk_col_list})")
     return f"CREATE TABLE {q(table_name)} (\n" + ",\n".join(col_defs) + "\n);"
 
-def insert_statements_sql(rows: list, table_name: str, dialect: str, batch_size: int = 1000) -> list:
+def insert_statements_sql(rows: list, table_name: str, dialect: str, batch_size: int = 1000,
+                           columns: list = None) -> list:
+    cols = columns if columns is not None else STABLE_COLUMNS
     cfg = DIALECTS[dialect]
     q = cfg["quote"]
-    col_list = ", ".join(q(c) for c in STABLE_COLUMNS)
+    col_list = ", ".join(q(c) for c in cols)
     statements = []
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
         value_rows = [
-            "(" + ", ".join(sql_literal(row[c], column_kind(c), dialect) for c in STABLE_COLUMNS) + ")"
+            "(" + ", ".join(sql_literal(row[c], column_kind(c), dialect) for c in cols) + ")"
             for row in batch
         ]
         statement = f"INSERT INTO {q(table_name)} ({col_list}) VALUES\n" + ",\n".join(value_rows) + ";"

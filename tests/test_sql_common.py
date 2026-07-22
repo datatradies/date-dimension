@@ -5,6 +5,7 @@ from nz_date_dimension.sql_common import (
     relative_view_sql, relative_select_sql, DIALECTS,
 )
 from nz_date_dimension.build import STABLE_COLUMNS, build_dataset
+from nz_date_dimension.columns import stable_columns
 
 def test_column_kind_classification():
     assert column_kind("Date") == "date"
@@ -109,3 +110,60 @@ def test_tsql_and_snowflake_create_table_still_declare_primary_key():
     for dialect in ("tsql", "snowflake"):
         ddl = create_table_sql("NZDateDimension", dialect)
         assert "PRIMARY KEY" in ddl
+
+# --- dynamic columns (spec §7 resolution 1: emitters must not hardcode NZ) ---
+
+def test_column_kind_classifies_country_as_string():
+    assert column_kind("Country") == "str"
+
+def test_create_table_sql_uses_the_columns_argument_not_stable_columns():
+    au_cols = stable_columns(["AU"])
+    ddl = create_table_sql("AUDateDimension", "snowflake", columns=au_cols)
+    assert '"IsHoliday_WA"' in ddl
+    assert '"IsHoliday_AUK"' not in ddl  # NZ-only column must not leak into AU DDL
+
+def test_create_table_sql_combined_includes_country_column():
+    combined_cols = stable_columns(["NZ", "AU"])
+    ddl = create_table_sql("ANZDateDimension", "tsql", columns=combined_cols)
+    assert "[Country]" in ddl
+    assert "[IsHoliday_NZ_AUK]" in ddl
+    assert "[IsHoliday_AU_WA]" in ddl
+
+def test_insert_statements_sql_uses_the_columns_argument():
+    rows = build_dataset(2025, 2025, country="AU")
+    au_cols = stable_columns(["AU"])
+    stmts = insert_statements_sql(rows, "AUDateDimension", "tsql", batch_size=1000, columns=au_cols)
+    assert len(stmts) == 1
+    assert "[IsHoliday_WA]" in stmts[0] or '"IsHoliday_WA"' in stmts[0]
+
+def test_create_table_sql_default_columns_unchanged_for_nz_backward_compat():
+    # No columns= argument -> must still default to STABLE_COLUMNS (NZ),
+    # preserving every existing call site's behaviour.
+    ddl = create_table_sql("NZDateDimension", "snowflake")
+    for col in STABLE_COLUMNS:
+        assert col in ddl
+
+# --- composite primary key for Combined mode (spec §7 resolution 5) ---
+
+def test_create_table_sql_default_primary_key_is_still_just_date():
+    for dialect in ("tsql", "snowflake"):
+        ddl = create_table_sql("NZDateDimension", dialect)
+        assert re.search(r"PRIMARY KEY \(.\bDate\b.\)", ddl)
+
+def test_create_table_sql_composite_primary_key_for_combined():
+    combined_cols = stable_columns(["NZ", "AU"])
+    for dialect in ("tsql", "snowflake"):
+        ddl = create_table_sql("ANZDateDimension", dialect, columns=combined_cols,
+                                primary_key=["Date", "Country"])
+        assert "PRIMARY KEY" in ddl
+        # both key columns present in the same constraint clause
+        pk_line = next(line for line in ddl.splitlines() if "PRIMARY KEY" in line)
+        assert "Date" in pk_line and "Country" in pk_line
+
+def test_databricks_create_table_composite_key_still_has_no_constraint():
+    combined_cols = stable_columns(["NZ", "AU"])
+    ddl = create_table_sql("ANZDateDimension", "databricks", columns=combined_cols,
+                            primary_key=["Date", "Country"])
+    assert "PRIMARY KEY" not in ddl
+    assert "CONSTRAINT" not in ddl
+    assert "Date" in ddl and "Country" in ddl  # documented in the informational comment
