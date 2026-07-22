@@ -8,3 +8,7 @@ __pycache__/
 BUILD-REPORT.md
 FIX-REPORT.md
 REVIEW-REPORT.md
+
+# internal build/review reports — not part of the published asset
+*-REPORT.md
+*-REVIEW.md
