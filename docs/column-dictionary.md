@@ -1,9 +1,14 @@
 # Column dictionary
 
-One row per column in the emitted CSV, in output order. Dates are ISO
-`YYYY-MM-DD`. Booleans are the literal strings `true` / `false`. Empty
-string means "no value" (currently only possible for `HolidayName` on a
-non-holiday date).
+The **Calendar**, **Fiscal**, **National holidays**, **Regional**, and
+**Metadata** sections below are the static/stable columns, one row per
+column in the emitted CSV, in output order. Dates are ISO `YYYY-MM-DD`.
+Booleans are the literal strings `true` / `false`. Empty string means "no
+value" (currently only possible for `HolidayName` on a non-holiday date).
+
+The **Relative / time-intelligence columns** section is different: those
+columns are dynamic (computed "as of today") and are **not** part of the
+static CSV — see that section for where they actually live.
 
 ## Calendar (core)
 
@@ -63,6 +68,53 @@ One `IsHoliday_<CODE>` boolean column per NZ subdivision (17 total): `AUK`,
 | Column | Type | Description |
 |---|---|---|
 | `IsHoliday_<CODE>` | boolean | `true` if this date is a public holiday in that subdivision — i.e. a national holiday **or** that region's provincial anniversary day. |
+
+## Relative / time-intelligence columns (DYNAMIC — not in the static CSV)
+
+**These columns are always computed "as of today" and are deliberately
+absent from the static CSV** — a frozen `IsCalendarYTD` in a CSV would be
+wrong the very next day (spec §4.5, §7). They exist only in the *dynamic*
+formats, where "today" is resolved live by the query engine's clock each
+time the query/model runs:
+
+| Format | Where | "Today" source |
+|---|---|---|
+| Power Query (M) | Directly in the emitted query | `DateTime.LocalNow()` |
+| T-SQL | Companion `CREATE VIEW` (not the base table) | `GETDATE()` |
+| Snowflake SQL | Companion `CREATE VIEW` (not the base table) | `CURRENT_DATE()` |
+| Databricks SQL | Companion `CREATE VIEW` (not the base table) | `current_date()` |
+| dbt model | The model itself (there is no static dbt seed for these) | `current_date()` |
+| Python generator | `nz_date_dimension.relative.relative_columns(d, today, ...)` | an injected `today` parameter (deterministic for tests) |
+
+**Timezone caveat:** "today" resolves in the query engine's/session's
+timezone, not necessarily NZ time — for `IsToday` / `IsCalendarYTD` to
+align to NZ midnight, run the dynamic formats in an NZ-timezone session.
+
+| Column | Type | Description |
+|---|---|---|
+| `DayOffset` | integer | Days from today to this date (`0` = today, negative = past, positive = future). |
+| `WeekOffset` | integer | Whole ISO weeks (Monday-start) from today's week to this date's week. |
+| `MonthOffset` | integer | Whole calendar months from today's month to this date's month. |
+| `QuarterOffset` | integer | Whole calendar quarters from today's quarter to this date's quarter. |
+| `YearOffset` | integer | Whole calendar years from today's year to this date's year. |
+| `FiscalYearOffset` | integer | Whole fiscal years from today's fiscal year to this date's fiscal year. |
+| `FiscalQuarterOffset` | integer | Whole fiscal quarters from today's fiscal quarter to this date's fiscal quarter. |
+| `IsToday` | boolean | `true` if this date is today. |
+| `IsCurrentWeek` | boolean | `true` if this date falls in today's ISO week (Monday–Sunday). |
+| `IsCurrentMonth` | boolean | `true` if this date falls in today's calendar month. |
+| `IsCurrentQuarter` | boolean | `true` if this date falls in today's calendar quarter. |
+| `IsCurrentYear` | boolean | `true` if this date falls in today's calendar year. |
+| `IsCurrentFiscalYear` | boolean | `true` if this date falls in today's fiscal year. |
+| `IsCalendarYTD` | boolean | `true` if this date is in today's calendar year **and** on or before today. |
+| `IsFiscalYTD` | boolean | `true` if this date is in today's fiscal year **and** on or before today. |
+| `IsMonthToDate` | boolean | `true` if this date is in today's calendar month **and** on or before today. |
+| `IsQuarterToDate` | boolean | `true` if this date is in today's calendar quarter **and** on or before today. |
+| `IsLast7Days` | boolean | `true` if this date is within the 7-day window ending today, inclusive (today − 6 days .. today). |
+| `IsLast30Days` | boolean | `true` if this date is within the 30-day window ending today, inclusive. |
+| `IsLast90Days` | boolean | `true` if this date is within the 90-day window ending today, inclusive. |
+| `IsPriorMonth` | boolean | `true` for every date in the calendar month immediately before today's month (the whole month, not "to date"). |
+| `IsPriorYear` | boolean | `true` for every date in the calendar year immediately before today's year (the whole year, not "to date"). |
+| `IsRolling12Months` | boolean | `true` if this date falls in today's (possibly partial) month or one of the 11 preceding full calendar months, and is on or before today. |
 
 ## Metadata
 

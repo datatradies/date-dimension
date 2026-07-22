@@ -1,9 +1,9 @@
 # NZ Date Dimension
 
 A parameterised Python generator that produces a correct, tested New Zealand
-date dimension (calendar table) and emits it to CSV — the kind of "done
-properly" date dimension every NZ data warehouse eventually needs, built
-once and open-sourced instead of rebuilt badly by every team.
+date dimension (calendar table) and emits it to **six formats** — the kind
+of "done properly" date dimension every NZ data warehouse eventually needs,
+built once and open-sourced instead of rebuilt badly by every team.
 
 ## Why this is "done properly"
 
@@ -21,6 +21,11 @@ the rest wrong. This one doesn't cut those corners:
 - **17 regional public holiday flags** — one `IsHoliday_<CODE>` column per
   NZ subdivision, so "is this a public holiday in Auckland vs. Wellington"
   is a single boolean lookup, not a lookup table you have to build yourself.
+- **Relative / time-intelligence columns** (`IsToday`, `IsCalendarYTD`,
+  `IsRolling12Months`, offsets, ...) — always computed *live* against the
+  query engine's clock in every dynamic format, never frozen into a stale
+  static file. See [Relative columns](#relative--time-intelligence-columns)
+  below.
 - All holiday logic comes from [`python-holidays`](https://github.com/vacanza/holidays)
   (actively maintained, MIT licensed) rather than a hand-rolled and
   inevitably-stale holiday table.
@@ -64,15 +69,72 @@ CLI flags:
 |---|---|---|
 | `--start-year` | `2015` | First calendar year included (inclusive). |
 | `--end-year` | `2050` | Last calendar year included (inclusive). Values beyond `2052` emit a warning that Matariki is not gazetted that far out. |
-| `--out` | `outputs/nz-date-dimension.csv` | Output CSV path. |
+| `--out` | per-format (see [Formats](#formats)) | Output path. Ignored when `--format all` or `--format dbt` (they always write to their fixed default paths since they produce more than one file). |
 | `--fiscal-start-month` | `4` | First month of the NZ fiscal year (1 = January … 12 = December). |
+| `--format` | `csv` | One of `csv`, `tsql`, `snowflake`, `databricks`, `powerquery`, `dbt`, `all`. `all` writes every format in one run. |
+
+Examples:
+
+```bash
+# Snowflake SQL (CREATE TABLE + INSERT + a relative-columns VIEW)
+python -m nz_date_dimension.cli --format snowflake --out ../outputs/nz-date-dimension.snowflake.sql
+
+# Power Query (M) — a single query, ready to paste into Get Data > Blank Query
+python -m nz_date_dimension.cli --format powerquery --out ../outputs/nz-date-dimension.pq
+
+# Everything at once, into outputs/ (and outputs/dbt/ for the dbt model + seed)
+python -m nz_date_dimension.cli --format all
+```
+
+## Formats
+
+Every format is emitted from the **same** Python-computed dataset — one
+generator, per-format emitters, no per-format drift — guarded by a
+cross-format consistency test in `tests/test_cross_format_consistency.py`.
+
+| Format | Status | Emitter | Notes |
+|---|---|---|---|
+| CSV | ✅ Available | `emit_csv.py` | Stable columns only + a `GeneratedOn` stamp. The ready-made download above. |
+| T-SQL (SQL Server) | ✅ Available | `emit_tsql.py` | `CREATE TABLE` + batched `INSERT`s of the stable rows, plus a `CREATE VIEW` deriving the relative columns from `GETDATE()`. |
+| Snowflake SQL | ✅ Available | `emit_snowflake.py` | Same shape as T-SQL, Snowflake-native types/functions (`BOOLEAN`, `CURRENT_DATE()`, `DAYOFWEEKISO`). |
+| Databricks SQL | ✅ Available | `emit_databricks.py` | Same shape again, Spark SQL functions (`current_date()`, `dayofweek()`-derived ISO weekday). |
+| Power Query (M) | ✅ Available | `emit_powerquery.py` | A single `let...in` query: the stable rows as a `#table` literal, plus the relative columns computed live via `DateTime.LocalNow()` on every refresh — no separate view needed. |
+| dbt model | ✅ Available | `emit_dbt.py` | `dbt_utils.date_spine` generates the calendar spine; a seed (`nz_date_dimension_holidays.csv`) carries the holiday/Matariki/provincial lookup; relative columns via `current_date()`. Snowflake-flavoured SQL — see the model's own header comment. |
+| Power BI (`.pbit`/`.pbix`) | 🔜 Fast-follow | — | Not in this repo yet — see [Roadmap](#roadmap). |
+
+### Relative / time-intelligence columns
+
+`DayOffset`, `WeekOffset`, `MonthOffset`, `QuarterOffset`, `YearOffset`,
+`FiscalYearOffset`, `FiscalQuarterOffset`, `IsToday`, `IsCurrentWeek`,
+`IsCurrentMonth`, `IsCurrentQuarter`, `IsCurrentYear`,
+`IsCurrentFiscalYear`, `IsCalendarYTD`, `IsFiscalYTD`, `IsMonthToDate`,
+`IsQuarterToDate`, `IsLast7Days`, `IsLast30Days`, `IsLast90Days`,
+`IsPriorMonth`, `IsPriorYear`, `IsRolling12Months`.
+
+These are **dynamic** — always "as of today" — so they are **deliberately
+not in the static CSV** (a frozen `IsCalendarYTD` would be wrong the next
+day). They live in:
+
+- `generator/nz_date_dimension/relative.py` — the reference Python
+  implementation (tested against an injectable `today` so results are
+  deterministic).
+- The **Power Query** output directly (computed via `DateTime.LocalNow()`).
+- A companion **`CREATE VIEW`** in each SQL format (derived from
+  `CURRENT_DATE`/`GETDATE()`/`current_date()`).
+- The **dbt model** (derived from `current_date()`, recomputed every run).
+
+**Timezone caveat:** "today" resolves via the query engine's clock — the
+session/warehouse timezone, not necessarily NZ time. For `IsToday` /
+`IsCalendarYTD` to align to NZ midnight, run the dynamic formats in an
+NZ-timezone session/context.
 
 ## Columns
 
 Every row is one calendar date. See
 [`docs/column-dictionary.md`](docs/column-dictionary.md) for the full list —
-calendar columns, fiscal-year columns, national holiday columns, and the 17
-per-region `IsHoliday_<CODE>` flags — with type and description for each.
+calendar columns, fiscal-year columns, national holiday columns, the 17
+per-region `IsHoliday_<CODE>` flags, and the relative/time-intelligence
+columns — with type and description for each.
 
 ## Running the tests
 
@@ -99,12 +161,13 @@ computation via [`python-holidays`](https://github.com/vacanza/holidays)
 
 ## Roadmap
 
-This repo is **Plan A**: the core generator and CSV emitter. Deliberately
-deferred to a later **Plan B**:
+**Plan A** (core generator + CSV) and **Plan B** (relative/time-intelligence
+columns, T-SQL/Snowflake/Databricks/Power Query/dbt emitters, and the
+cross-format consistency test) are both done — see [Formats](#formats).
 
-- Relative / time-intelligence columns (e.g. `IsToday`, `DaysFromToday`,
-  rolling period flags).
-- Additional emitters — SQL (DDL + `INSERT`s), Power Query (M), dbt seed —
-  plus a cross-format consistency test so every emitter agrees with the CSV.
-- A Power BI template (`.pbit`)/`.pbix` fast-follow.
-- Expanding beyond Aotearoa New Zealand to the wider Pacific.
+Still ahead:
+
+- A Power BI template (`.pbit`)/`.pbix` fast-follow with DAX measures
+  (gated / email-capture piece).
+- Expanding beyond Aotearoa New Zealand to the wider Pacific (the generator
+  already parameterises country/region and fiscal-year-start for this).
