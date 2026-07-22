@@ -12,3 +12,5 @@ REVIEW-REPORT.md
 # internal build/review reports — not part of the published asset
 *-REPORT.md
 *-REVIEW.md
+!outputs/au-date-dimension.csv
+!outputs/anz-date-dimension.csv
