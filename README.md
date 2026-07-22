@@ -27,20 +27,28 @@ the rest wrong. This one doesn't cut those corners:
 
 ## Quick start
 
+Works the same on Windows (PowerShell/cmd) and bash/zsh — run from inside
+`generator/`, writing back out to the repo-root `outputs/` folder:
+
 ```bash
 pip install -r requirements.txt
 
-# From the repo root (PYTHONPATH points at the generator/ package):
-PYTHONPATH=generator python -m nz_date_dimension.cli
-
-# ...or from inside generator/, writing back out to the repo-root outputs/ folder:
 cd generator
 python -m nz_date_dimension.cli --out ../outputs/nz-date-dimension.csv
 ```
 
-Either form writes the full 2015–2050 date dimension to
+This writes the full 2015–2050 date dimension to
 [`outputs/nz-date-dimension.csv`](outputs/nz-date-dimension.csv) (not
 committed to the repo — regenerate it locally; see `.gitignore`).
+
+Prefer running from the repo root instead? Point `PYTHONPATH` at the
+`generator/` package for your shell:
+
+| Shell | Command |
+|---|---|
+| bash / zsh | `PYTHONPATH=generator python -m nz_date_dimension.cli` |
+| PowerShell | `$env:PYTHONPATH="generator"; python -m nz_date_dimension.cli` |
+| cmd.exe | `set PYTHONPATH=generator && python -m nz_date_dimension.cli` |
 
 CLI flags:
 
@@ -61,9 +69,13 @@ per-region `IsHoliday_<CODE>` flags — with type and description for each.
 ## Running the tests
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 pytest -v
 ```
+
+`requirements-dev.txt` pulls in the runtime dependency (`holidays==0.101`)
+plus `pytest`; `requirements.txt` alone (used by the quick start above) is
+runtime-only.
 
 ## Attribution
 
