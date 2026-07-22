@@ -142,6 +142,16 @@ regional split (a region's provincial anniversary doesn't flip NZ's main
 up in that state's own `IsHoliday_<STATE>` flag. Use the per-state flag if
 your business calendar needs a specific state's observance.
 
+**Practical consequence: AU's `IsObserved` column is always `false`.**
+Because the national calendar never Mondayises, the "diff" check above
+(`observed=True` holiday not present under `observed=False`) never finds
+a difference at the national level — there is no AU row, in any year, for
+which `IsObserved` is `true`. This is expected, not a bug: the actual
+make-up Monday for a given state **is** correctly captured, just in that
+state's own `IsHoliday_<STATE>` flag rather than in the national
+`IsObserved` column. If you need "is this a day off" for a specific AU
+state, use `IsHoliday_<STATE>`, not `IsObserved`.
+
 ### Combined ANZ mode
 
 `--country combined` produces **one table** with:

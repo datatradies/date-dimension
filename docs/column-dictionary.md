@@ -93,11 +93,22 @@ detection](../README.md#observed-day-detection) section for why):
   and instead *replaces* the original weekend date entirely, so the NZ
   suffix check would never fire for it.
 
+**AU's `IsObserved` is always `false`.** The diff check above is evaluated
+against AU's *national* (no-subdivision) calendar, and that calendar never
+Mondayises (see the README's [Observed-day
+detection](../README.md#observed-day-detection) section) — so the diff
+never finds anything to flag, for any AU row in any year. This does not
+mean AU has no days off for a Mondayised holiday: the make-up Monday is
+correctly present, but only in the relevant state's own
+`IsHoliday_<STATE>` flag (below), not in this national column. Consumers
+who need "is this a day off" for a specific AU state should filter on
+`IsHoliday_<STATE>`, not `IsObserved`.
+
 | Column | Type | Description |
 |---|---|---|
 | `IsHoliday` | boolean | `true` if this date is a national public holiday for this row's country (including Mondayised/observed days). |
 | `HolidayName` | string | Holiday name verbatim from `python-holidays` (empty if not a holiday). **Not a stable filter key across years or library versions** — use `IsHoliday` / `IsObserved`, not name matching. |
-| `IsObserved` | boolean | `true` if this date is a Mondayised "observed" day — see the country-specific detection above. |
+| `IsObserved` | boolean | `true` if this date is a Mondayised "observed" day — see the country-specific detection above. **Always `false` for AU** (its national calendar never Mondayises); use the per-state `IsHoliday_<CODE>` flags for AU days off. |
 | `IsBusinessDay` | boolean | `true` unless this date is a weekend or this row's country's national public holiday (region/state-only holidays don't affect this — see their own `IsHoliday_<CODE>` flag). |
 
 ## Regional (provincial/state holiday flags)
