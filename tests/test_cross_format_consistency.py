@@ -19,6 +19,7 @@ import io
 import re
 from datetime import date
 from nz_date_dimension.build import build_dataset, STABLE_COLUMNS
+from nz_date_dimension.columns import stable_columns
 from nz_date_dimension.emit_csv import write_csv
 from nz_date_dimension.emit_tsql import emit_tsql
 from nz_date_dimension.emit_powerquery import emit_powerquery
@@ -30,6 +31,34 @@ SAMPLE_DATES = [
     date(2025, 7, 23),   # ordinary weekday
     date(2025, 7, 26),   # Saturday -- weekend, non-holiday
     date(2025, 12, 25),  # Christmas -- national holiday
+]
+
+# M-3: AU's own analog of SAMPLE_DATES -- a national holiday, a
+# regional(state)-only holiday, an ordinary weekday, a weekend, and
+# Christmas -- for the AU round-trip test below.
+AU_SAMPLE_DATES = [
+    date(2025, 1, 1),    # New Year's Day -- national holiday
+    date(2025, 11, 4),   # Melbourne Cup (1st Tue Nov) -- VIC-only regional holiday
+    date(2025, 7, 23),   # ordinary weekday
+    date(2025, 7, 26),   # Saturday -- weekend, non-holiday
+    date(2025, 12, 25),  # Christmas -- national holiday
+]
+
+# M-3: (date, country) pairs for the Combined ANZ round-trip test -- covers
+# a date that's a national holiday for BOTH countries (New Year's, ANZAC),
+# a country-specific national holiday (NZ Waitangi Day), a state-only AU
+# holiday (WA Labour Day), and a plain weekend -- so the `Country` column
+# and the country-prefixed IsHoliday_NZ_<code>/IsHoliday_AU_<code> flags
+# are exercised for both countries, not just present.
+COMBINED_SAMPLE = [
+    (date(2025, 1, 1), "NZ"),    # New Year's Day -- national holiday, both countries
+    (date(2025, 1, 1), "AU"),
+    (date(2025, 2, 6), "NZ"),    # Waitangi Day -- NZ-only national holiday
+    (date(2025, 3, 3), "AU"),    # WA Labour Day -- AU state-only holiday
+    (date(2025, 4, 25), "NZ"),   # ANZAC Day -- both countries
+    (date(2025, 4, 25), "AU"),
+    (date(2025, 7, 26), "NZ"),   # Saturday -- weekend, non-holiday
+    (date(2025, 12, 25), "AU"),  # Christmas -- national holiday
 ]
 
 def _split_top_level(s: str, quote_char: str) -> list:
@@ -212,3 +241,108 @@ def test_extract_row_tokens_handles_holiday_name_containing_close_paren():
     holiday_name_idx = STABLE_COLUMNS.index("HolidayName")
     decoded = _decode_sql_token(tokens[holiday_name_idx], "str", "tsql")
     assert decoded == observed_row["HolidayName"]
+
+def test_au_stable_columns_agree_across_csv_sql_and_powerquery(tmp_path):
+    """M-3: extend the cross-format round-trip guard to AU (previously NZ
+    only). Decodes CSV/T-SQL/M back to values for a single-country AU
+    dataset and compares each against the source `rows`, covering a
+    national holiday, a state-only regional holiday (Melbourne Cup, VIC),
+    an ordinary weekday, a weekend, and Christmas -- so AU's bare
+    `IsHoliday_<STATE>` flags are verified at the DECODED VALUE level, not
+    just checked for presence (which the emit_*.py unit tests already do).
+    """
+    au_columns = stable_columns(["AU"])
+    rows = build_dataset(2025, 2025, country="AU")  # 365 rows
+    rows_by_date = {r["Date"]: r for r in rows}
+
+    csv_path = tmp_path / "au.csv"
+    write_csv(rows, str(csv_path), generated_on=date(2026, 7, 22), columns=au_columns)
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        csv_by_date = {r["Date"]: r for r in csv.DictReader(f)}
+
+    sql_text = emit_tsql(rows, table_name="AUDateDimension", fiscal_start_month=7, columns=au_columns)
+    m_text = emit_powerquery(rows, fiscal_start_month=7, columns=au_columns)
+
+    for d in AU_SAMPLE_DATES:
+        original = rows_by_date[d]
+        date_key = original["DateKey"]
+
+        csv_row = csv_by_date[d.isoformat()]
+        sql_tokens = _extract_row_tokens(
+            sql_text, date_key, r"\('\d{4}-\d{2}-\d{2}'", ")", "'"
+        )
+        m_tokens = _extract_row_tokens(
+            m_text, date_key, r"\{#date\(\d+,\s*\d+,\s*\d+\)", "}", '"'
+        )
+
+        for i, col in enumerate(au_columns):
+            kind = column_kind(col)
+            expected = original[col]
+            csv_val = _decode_csv_value(csv_row[col], kind)
+            sql_val = _decode_sql_token(sql_tokens[i], kind, "tsql")
+            m_val = _decode_m_token(m_tokens[i], kind)
+            assert csv_val == expected, f"AU {d} {col}: CSV={csv_val!r} != source={expected!r}"
+            assert sql_val == expected, f"AU {d} {col}: T-SQL={sql_val!r} != source={expected!r}"
+            assert m_val == expected, f"AU {d} {col}: M={m_val!r} != source={expected!r}"
+
+def test_combined_stable_columns_agree_across_csv_sql_and_powerquery(tmp_path):
+    """M-3: extend the cross-format round-trip guard to Combined ANZ mode.
+    The NZ-only round-trip test never exercised the `Country` column or the
+    country-prefixed `IsHoliday_NZ_<code>` / `IsHoliday_AU_<code>` flags at
+    the DECODED VALUE level -- only their presence was checked by
+    emit_*.py's own unit tests. This decodes CSV/T-SQL/M rows for both a
+    date that's a national holiday in both countries (New Year's, ANZAC),
+    a country-specific national holiday (NZ Waitangi Day), an AU
+    state-only holiday (WA Labour Day), and a weekend, verifying each
+    row's own-country columns AND the other country's structurally-false
+    flags survive the round trip.
+
+    Locating the right row in the SQL/M text needs the DateKey AND the
+    Country literal together (`_extract_row_tokens`'s date_key argument is
+    interpolated as-is into the search pattern, so passing e.g.
+    "20250101, 'NZ'" makes the search match only that country's row) --
+    plain DateKey isn't unique in Combined mode since both countries share
+    the same Date/DateKey on overlapping calendar days.
+    """
+    combined_columns = stable_columns(["NZ", "AU"])
+    rows = build_dataset(2025, 2025, country="combined")  # 730 rows
+    rows_by_key = {(r["Date"], r["Country"]): r for r in rows}
+
+    csv_path = tmp_path / "anz.csv"
+    write_csv(rows, str(csv_path), generated_on=date(2026, 7, 22), columns=combined_columns)
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        csv_by_key = {(r["Date"], r["Country"]): r for r in csv.DictReader(f)}
+
+    sql_text = emit_tsql(
+        rows, table_name="ANZDateDimension", fiscal_start_month=4,
+        columns=combined_columns, primary_key=["Date", "Country"],
+    )
+    m_text = emit_powerquery(rows, fiscal_start_month=4, columns=combined_columns)
+
+    for d, country in COMBINED_SAMPLE:
+        original = rows_by_key[(d, country)]
+        date_key = original["DateKey"]
+
+        csv_row = csv_by_key[(d.isoformat(), country)]
+        sql_tokens = _extract_row_tokens(
+            sql_text, f"{date_key}, '{country}'", r"\('\d{4}-\d{2}-\d{2}'", ")", "'"
+        )
+        m_tokens = _extract_row_tokens(
+            m_text, f'{date_key}, "{country}"', r"\{#date\(\d+,\s*\d+,\s*\d+\)", "}", '"'
+        )
+
+        for i, col in enumerate(combined_columns):
+            kind = column_kind(col)
+            expected = original[col]
+            csv_val = _decode_csv_value(csv_row[col], kind)
+            sql_val = _decode_sql_token(sql_tokens[i], kind, "tsql")
+            m_val = _decode_m_token(m_tokens[i], kind)
+            assert csv_val == expected, (
+                f"Combined {d}/{country} {col}: CSV={csv_val!r} != source={expected!r}"
+            )
+            assert sql_val == expected, (
+                f"Combined {d}/{country} {col}: T-SQL={sql_val!r} != source={expected!r}"
+            )
+            assert m_val == expected, (
+                f"Combined {d}/{country} {col}: M={m_val!r} != source={expected!r}"
+            )
